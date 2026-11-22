@@ -9,16 +9,17 @@
   <title>掌上屏伴侣</title>
   <link rel="stylesheet" href="style.css">
   <script defer src="providers.js"></script>
-  <script defer src="ble.js?v=2"></script>
-  <script defer src="app.js?v=2"></script>
+  <script defer src="ble.js?v=3"></script>
+  <script defer src="app.js?v=3"></script>
 </head>
 <body><main>
   <header><span class="mark" aria-hidden="true">⌁</span><strong>掌上屏伴侣</strong><span id="badge">未连接</span></header>
   <section class="connect">
     <p class="kicker">WAVESHARE COMPANION</p>
     <h1>连接随身屏</h1>
-    <p>用 iPhone 的网络获取行情，通过蓝牙显示在小屏上。看盘时，请将此页留在前台。</p>
+    <p>首次使用，先在小屏的「设备设置」开启 Bluefy 配对，再在这里选择 Waveshare Companion。</p>
     <button id="connect">连接蓝牙屏</button>
+    <button id="choose" class="text">显示所有附近设备</button>
     <output id="status" aria-live="polite">请打开小屏并开启 iPhone 蓝牙。</output>
     <div id="help"><a href="https://apps.apple.com/cn/app/bluefy-web-ble-browser/id1492822055" rel="noreferrer">下载免费 Bluefy</a><button id="copy" class="text">复制本页链接</button></div>
   </section>

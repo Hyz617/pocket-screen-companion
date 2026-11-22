@@ -105,9 +105,26 @@
       this.phaseName = 'stopped';
       this.lastPhaseText = '';
       this.lost = null;
+      this.authorizedDevice = null;
+      this.findAuthorizedDevice();
       if (typeof window !== 'undefined') window.addEventListener('pagehide', () => this.disconnect());
     }
     get connected() { return Boolean(this.session && this.session.ready); }
+
+    // Populate the cache before a tap. The picker must be called directly from the
+    // user's gesture even when enumeration is slow, unavailable or returns nothing.
+    async findAuthorizedDevice() {
+      if (!this.bluetooth || typeof this.bluetooth.getDevices !== 'function') return;
+      try {
+        let saved;
+        try { saved = localStorage.getItem('waveshare-ble-device'); } catch (_) {}
+        const devices = await this.bluetooth.getDevices();
+        if (this.device || this.wanted) return;
+        const matches = devices.filter(d => d.name === 'Waveshare Companion');
+        this.authorizedDevice = devices.find(d => saved && d.id === saved) ||
+                                (matches.length === 1 ? matches[0] : null);
+      } catch (_) { /* Enumeration is optional; the foreground picker remains available. */ }
+    }
 
     phase(name, text) {
       this.phaseName = name;
@@ -164,21 +181,19 @@
       this.phase('connecting','正在准备蓝牙连接…');
       const ticket = ++this.epoch;
       const work = (async () => {
-        let target = !choose && this.device;
-        let saved;
-        try { saved = localStorage.getItem('waveshare-ble-device'); } catch (_) {}
-        if (!target && !choose && saved && this.bluetooth.getDevices) {
-          try { target = (await this.bluetooth.getDevices()).find(d => d.id === saved); } catch (_) {}
-          if (!target) {
-            // A fresh chooser may need a new tap on iOS after this asynchronous lookup.
-            try { localStorage.removeItem('waveshare-ble-device'); } catch (_) {}
-          }
-        }
+        let target = !choose && (this.device || this.authorizedDevice);
         if (!target) {
           this.phase('connecting','选择 Waveshare Companion，并允许蓝牙连接');
-          target = await this.bluetooth.requestDevice({
-            filters: [{services:[SERVICE]}, {namePrefix:'Waveshare'}], optionalServices: [SERVICE]
-          });
+          try {
+            const filter = choose ? {acceptAllDevices:true} : {filters:[{services:[SERVICE]}]};
+            target = await this.bluetooth.requestDevice({...filter,optionalServices:[SERVICE]});
+          } catch (error) {
+            if (error.name === 'NotFoundError') throw new Error('未选到蓝牙屏。请在小屏打开 Bluefy 配对，再点「显示所有附近设备」。');
+            if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
+              throw new Error('Bluefy 未获准搜索。请在 iPhone「设置 → 隐私与安全性 → 蓝牙」允许 Bluefy，再点连接。');
+            }
+            throw error;
+          }
         }
         if (!this.wanted || ticket !== this.epoch) throw abort();
         this.device = target;

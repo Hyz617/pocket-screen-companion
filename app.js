@@ -59,6 +59,7 @@
     const usable=connected&&phase==='connected';
     el('connect').textContent=pending?'取消连接':connected?'断开蓝牙屏':connecting?'连接中…':'连接蓝牙屏';
     el('connect').disabled=connecting&&!pending;
+    el('choose').hidden=Boolean(pending||connecting||connected||!navigator.bluetooth);
     el('read').disabled=!usable||loading||saving;
     let valid=true;
     for (const id of ['stocks','pairs']) {
@@ -95,13 +96,15 @@
     });g.stroke();
     chart.setAttribute('aria-label',quote.interval+'走势，最新价 '+quote.price+'，最低 '+min+'，最高 '+max);
   }
-  el('connect').onclick=async()=>{
+  async function connect(choose) {
     if(connected||phase==='recovering'||phase==='verifying'||phase==='connecting') {link.disconnect();return;}
     connecting=true; controls();
-    try {await link.connect();}
+    try {await link.connect({choose});}
     catch(e) {if(phase!=='stopped'&&phase!=='failed') el('status').textContent=e.name==='NotFoundError'?'未选到设备。请在小屏的设备设置中开启伴侣搜索，再点连接。':(e.message||'蓝牙连接失败');}
     finally {connecting=false; controls();}
-  };
+  }
+  el('connect').onclick=()=>connect(false);
+  el('choose').onclick=()=>connect(true);
   el('copy').onclick=async()=>{
     try {await navigator.clipboard.writeText(location.href);el('status').textContent='已复制，请粘贴到 Bluefy 的地址栏。';}
     catch(_) {el('status').textContent='请在地址栏长按并复制这个网页地址。';}
