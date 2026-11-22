@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0c1417">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https://web.ifzq.gtimg.cn https://www.okx.com https://api.deepseek.com; img-src 'self' data:; object-src 'none'; form-action 'none'; base-uri 'none'">
+  <title>掌上屏伴侣</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="providers.js"></script>
+  <script defer src="ble.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body><main>
+  <header><span class="mark" aria-hidden="true">⌁</span><strong>掌上屏伴侣</strong><span id="badge">未连接</span></header>
+  <section class="connect">
+    <p class="kicker">WAVESHARE COMPANION</p>
+    <h1>连接随身屏</h1>
+    <p>用 iPhone 的网络获取行情，通过蓝牙显示在小屏上。看盘时，请将此页留在前台。</p>
+    <button id="connect">连接蓝牙屏</button>
+    <output id="status" aria-live="polite">请打开小屏并开启 iPhone 蓝牙。</output>
+    <div id="help"><a href="https://apps.apple.com/cn/app/bluefy-web-ble-browser/id1492822055" rel="noreferrer">下载免费 Bluefy</a><button id="copy" class="text">复制本页链接</button></div>
+  </section>
+  <nav aria-label="功能"><button data-tab="screen" aria-pressed="true">行情</button><button data-tab="watch" aria-pressed="false">自选</button><button data-tab="ai" aria-pressed="false">DeepSeek</button></nav>
+  <section class="panel" id="screen">
+    <h2>屏上行情</h2><p id="quoteHint">连好后，在小屏打开「股票自选」或「欧易看盘」。在小屏切换标的，手机会跟随刷新。</p>
+    <article id="quote" hidden><p id="quoteName"></p><strong id="price"></strong><span id="change"></span>
+    <canvas id="chart" width="600" height="148" aria-label="当前标的价格走势" role="img"></canvas>
+    <p id="quoteMeta"></p></article>
+  </section>
+  <section class="panel" id="watch" hidden>
+    <h2>我的自选</h2><p>可粘贴同花顺自选的股票代码，以及欧易交易对。每类最多 24 项，保存后会替换小屏上的清单。</p>
+    <label for="stocks">沪深京股票</label><textarea id="stocks" rows="3" spellcheck="false" placeholder="600519.SH、000001.SZ"></textarea>
+    <output id="stocksPreview"></output>
+    <label for="pairs">欧易交易对</label><textarea id="pairs" rows="3" spellcheck="false" placeholder="BTC-USDT、ETH-USDT"></textarea><output id="pairsPreview"></output>
+    <div class="actions"><button id="save" disabled>保存到小屏</button><button id="read" class="secondary" disabled>读取小屏清单</button></div><output id="watchStatus" aria-live="polite"></output>
+  </section>
+  <section class="panel" id="ai" hidden>
+    <h2>DeepSeek 对话</h2>
+    <label for="key">API 密钥</label><input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…">
+    <p class="note">密钥只在本页打开期间使用。提问由手机直连 DeepSeek，按你的 API 账户计费。</p>
+    <label for="question">问点什么</label><textarea id="question" rows="2" placeholder="输入一个适合在小屏上阅读的问题"></textarea>
+    <button id="ask" disabled>提问并同步到小屏</button><output id="aiStatus" aria-live="polite"></output>
+    <article id="reply" hidden><strong id="asked"></strong><p id="answer"></p></article>
+  </section>
+</main></body></html>
