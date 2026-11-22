@@ -172,7 +172,7 @@
       this.reselect(true);
       try { localStorage.removeItem('waveshare-ble-device'); } catch (_) {}
       // Keep the actual picker on this tap, including when an old grant still exists.
-      return this.connect();
+      return this.connect({choose:true});
     }
 
     async nativeOp(device, ticket, stage, ms, operation) {
@@ -225,13 +225,13 @@
       const work = (async () => {
         let target = !choose && !this.needsReselect && (this.device || this.authorizedDevice);
         if (!target) {
-          this.step(this.needsReselect && !choose ? '重新选择蓝牙屏' : '选择小屏并授权');
+          this.step(choose ? '列出所有附近设备' : '选择小屏并授权');
           this.phase('connecting','选择 Waveshare Companion，并允许蓝牙连接');
           try {
-            const filter = choose ? {acceptAllDevices:true} : {filters:[{services:[SERVICE]}]};
+            const filter = choose ? {acceptAllDevices:true} : {filters:[{services:[SERVICE]},{name:'Waveshare Companion'}]};
             target = await this.bluetooth.requestDevice({...filter,optionalServices:[SERVICE]});
           } catch (error) {
-            if (error.name === 'NotFoundError') throw Object.assign(new Error('未选到蓝牙屏或已取消选择（NotFoundError）。请在小屏打开 Bluefy 配对，再点「显示所有附近设备」。'), {nativeName:error.name});
+            if (error.name === 'NotFoundError') throw Object.assign(new Error('未选到蓝牙屏或已取消选择（NotFoundError）。请在小屏开启 Bluefy 配对，倒计时出现后点「重置并重新选择」。'), {nativeName:error.name});
             if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
               throw Object.assign(new Error('Bluefy 未获准搜索（' + error.name + '）。请在 iPhone「设置 → 隐私与安全性 → 蓝牙」允许 Bluefy，再点连接。'), {nativeName:error.name});
             }
@@ -263,7 +263,8 @@
       try {
         if (typeof owner[single] !== 'function') throw new TypeError('Bluefy 未提供直接查询');
         const result = await this.nativeOp(s.device,s.ticket,label,8000,() => owner[single](uuid));
-        if (result) return result;
+        if (result && (!result.uuid || uuidKey(result.uuid) === uuidKey(uuid))) return result;
+        if (result) throw new Error('返回的蓝牙项目与所需标识不符');
         throw new Error('没有返回查询结果');
       } catch (error) { direct = error; }
       this.check(s.ticket);
