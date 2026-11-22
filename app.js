@@ -1,5 +1,8 @@
 (() => {
   const el = id => document.getElementById(id);
+  let setup=new URLSearchParams(location.search).get('setup')==='1';
+  const normalHelp=el('connectHelp').textContent;
+  if(setup) el('connectHelp').textContent='先点「首次授权小屏」打开设备列表，选择 Waveshare Companion。如果列表为空，在小屏的「设备设置」点「开启 Bluefy 配对」，让手机继续搜索。';
   let connected=false, connecting=false, phase='stopped', saving=false, loading=false, asking=false, listsReady=false, session=0, answerTimer;
   const phases={connecting:'连接中',verifying:'正在验证',recovering:'恢复同步中',connected:'已连接',stopped:'未连接',failed:'连接失败'};
   const traceKey='waveshare-connection-trace-v4';
@@ -55,6 +58,7 @@
     ai: (question,options) => PhoneProviders.ai(question,el('key').value,options),
     onConnection: value => {
       clearTimeout(answerTimer);
+      if(value&&setup) {setup=false;el('connectHelp').textContent=normalHelp;}
       connected=value; session++; listsReady=false; loading=false; saving=false; asking=false;
       el('quote').hidden=true;
       el('watchStatus').textContent=value?'正在读取小屏自选…':'连接后可编辑小屏自选。';
@@ -101,7 +105,9 @@
   function controls() {
     const pending=phase==='recovering'||phase==='verifying'||phase==='connecting';
     const usable=connected&&phase==='connected';
-    el('connect').textContent=pending?'取消连接':connected?'断开蓝牙屏':connecting?'连接中…':'连接已授权小屏';
+    el('connect').textContent=pending?'取消连接':connected?'断开蓝牙屏':connecting?'连接中…':
+                             setup?'首次授权小屏':'连接已授权小屏';
+    el('authorize').textContent=setup?'连接已授权小屏':'首次授权';
     el('connect').disabled=connecting&&!pending;
     el('authorize').hidden=Boolean(pending||connecting||connected||!navigator.bluetooth);
     el('read').disabled=!usable||loading||saving;
@@ -147,15 +153,15 @@
     catch(e) {if(phase!=='stopped'&&phase!=='failed') el('status').textContent=e.name==='NotFoundError'?'未选到设备。请在小屏的设备设置中开启伴侣搜索，再点连接。':(e.message||'蓝牙连接失败');}
     finally {connecting=false; controls();}
   }
-  el('connect').onclick=()=>connect();
-  el('authorize').onclick=()=>connect(true);
+  el('connect').onclick=()=>connect(setup);
+  el('authorize').onclick=()=>connect(!setup);
   el('copy').onclick=async()=>{
     try {await navigator.clipboard.writeText(location.href);el('status').textContent='已复制，请粘贴到 Bluefy 的地址栏。';}
     catch(_) {el('status').textContent='请在地址栏长按并复制这个网页地址。';}
   };
   el('traceCopy').onclick=async()=>{
     const count=grantCount===null?'尚未读取':grantCount+' 台';
-    const report=['小屏连接记录 v8','上次读取本站授权列表：'+count,...traceRows].concat(lastIssue ? ['最近一次异常 '+lastIssue] : []).join('\n');
+    const report=['小屏连接记录 v9','上次读取本站授权列表：'+count,...traceRows].concat(lastIssue ? ['最近一次异常 '+lastIssue] : []).join('\n');
     try {
       await navigator.clipboard.writeText(report);
       el('traceCopyStatus').textContent='连接记录已复制。';

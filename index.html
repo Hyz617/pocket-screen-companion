@@ -7,17 +7,17 @@
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https://web.ifzq.gtimg.cn https://www.okx.com https://api.deepseek.com; img-src 'self' data:; object-src 'none'; form-action 'none'; base-uri 'none'">
   <title>掌上屏伴侣</title>
-  <link rel="stylesheet" href="style.css?v=8">
-  <script defer src="providers.js?v=8"></script>
-  <script defer src="ble.js?v=8"></script>
-  <script defer src="app.js?v=8"></script>
+  <link rel="stylesheet" href="style.css?v=9">
+  <script defer src="providers.js?v=9"></script>
+  <script defer src="ble.js?v=9"></script>
+  <script defer src="app.js?v=9"></script>
 </head>
 <body><main>
   <header><span class="mark" aria-hidden="true">⌁</span><strong>掌上屏伴侣</strong><span id="badge">未连接</span></header>
   <section class="connect">
     <p class="kicker">WAVESHARE COMPANION</p>
     <h1>连接随身屏</h1>
-    <p>以前在这个网页连过小屏，点「连接已授权小屏」即可。第一次使用时，先点「首次授权」，再到小屏的「设备设置」开启 Bluefy 配对，选择 Waveshare Companion。</p>
+    <p id="connectHelp">以前在这个网页连过小屏，点「连接已授权小屏」即可。第一次使用时，先点「首次授权」，再到小屏的「设备设置」开启 Bluefy 配对，选择 Waveshare Companion。</p>
     <button id="connect">连接已授权小屏</button>
     <button id="authorize" class="text" hidden>首次授权</button>
     <output id="status" aria-live="polite">请打开小屏并开启 iPhone 蓝牙。</output>
