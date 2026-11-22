@@ -3,11 +3,12 @@
   let connected=false, connecting=false, phase='stopped', saving=false, loading=false, asking=false, listsReady=false, session=0, answerTimer;
   const phases={connecting:'连接中',verifying:'正在验证',recovering:'恢复同步中',connected:'已连接',stopped:'未连接',failed:'连接失败'};
   const traceKey='waveshare-connection-trace-v4';
-  let traceRows=[], lastIssue='';
+  let traceRows=[], lastIssue='', grantCount=null;
   try {
     const saved=JSON.parse(localStorage.getItem(traceKey) || '{}');
     if(Array.isArray(saved.rows)) traceRows=saved.rows.filter(s=>typeof s==='string').slice(-12);
     if(typeof saved.last==='string') lastIssue=saved.last;
+    if(Number.isInteger(saved.grantCount)) grantCount=saved.grantCount;
   } catch (_) {}
   function renderTrace() {
     el('traceRows').textContent=traceRows.join('\n');
@@ -20,6 +21,10 @@
     // Store only app-defined stages, standardized platform error names and numeric
     // status. Native error text can include device identifiers and never goes here.
     let detail=event.stage;
+    if(Number.isInteger(event.authorizedCount)) {
+      grantCount=event.authorizedCount;
+      detail+=' · '+grantCount+' 台';
+    }
     if(event.kind==='error') {
       const known=/^(?:[A-Za-z]{1,28}Error|Error|gattserverdisconnected)$/;
       const name=known.test(event.name||'') ? event.name : '';
@@ -37,7 +42,7 @@
     traceRows=[...traceRows.slice(-11),row];
     if(event.kind==='error') lastIssue=row;
     renderTrace();
-    try { localStorage.setItem(traceKey,JSON.stringify({rows:traceRows,last:lastIssue})); } catch(_) {}
+    try { localStorage.setItem(traceKey,JSON.stringify({rows:traceRows,last:lastIssue,grantCount})); } catch(_) {}
   }
   renderTrace();
   const link = new PhoneLink({
@@ -96,11 +101,9 @@
   function controls() {
     const pending=phase==='recovering'||phase==='verifying'||phase==='connecting';
     const usable=connected&&phase==='connected';
-    el('connect').textContent=pending?'取消连接':connected?'断开蓝牙屏':connecting?'连接中…':
-                             link.needsReselect?'重置并重新选择':'连接蓝牙屏';
+    el('connect').textContent=pending?'取消连接':connected?'断开蓝牙屏':connecting?'连接中…':'连接已授权小屏';
     el('connect').disabled=connecting&&!pending;
-    el('reset').hidden=Boolean(pending||connecting||link.needsReselect||!navigator.bluetooth);
-    el('resetHint').hidden=!connected;
+    el('authorize').hidden=Boolean(pending||connecting||connected||!navigator.bluetooth);
     el('read').disabled=!usable||loading||saving;
     let valid=true;
     for (const id of ['stocks','pairs']) {
@@ -137,21 +140,22 @@
     });g.stroke();
     chart.setAttribute('aria-label',quote.interval+'走势，最新价 '+quote.price+'，最低 '+min+'，最高 '+max);
   }
-  async function connect(reset=false) {
-    if(!reset&&(connected||phase==='recovering'||phase==='verifying'||phase==='connecting')) {link.disconnect();return;}
+  async function connect(choose=false) {
+    if(connected||phase==='recovering'||phase==='verifying'||phase==='connecting') {link.disconnect();return;}
     connecting=true; controls();
-    try {await (reset ? link.resetAndChoose() : link.connect());}
+    try {await link.connect({choose});}
     catch(e) {if(phase!=='stopped'&&phase!=='failed') el('status').textContent=e.name==='NotFoundError'?'未选到设备。请在小屏的设备设置中开启伴侣搜索，再点连接。':(e.message||'蓝牙连接失败');}
     finally {connecting=false; controls();}
   }
-  el('connect').onclick=()=>connect(link.needsReselect&&!connected&&!connecting&&phase!=='recovering');
-  el('reset').onclick=()=>connect(true);
+  el('connect').onclick=()=>connect();
+  el('authorize').onclick=()=>connect(true);
   el('copy').onclick=async()=>{
     try {await navigator.clipboard.writeText(location.href);el('status').textContent='已复制，请粘贴到 Bluefy 的地址栏。';}
     catch(_) {el('status').textContent='请在地址栏长按并复制这个网页地址。';}
   };
   el('traceCopy').onclick=async()=>{
-    const report=['小屏连接记录 v7',...traceRows].concat(lastIssue ? ['最近一次异常 '+lastIssue] : []).join('\n');
+    const count=grantCount===null?'尚未读取':grantCount+' 台';
+    const report=['小屏连接记录 v8','上次读取本站授权列表：'+count,...traceRows].concat(lastIssue ? ['最近一次异常 '+lastIssue] : []).join('\n');
     try {
       await navigator.clipboard.writeText(report);
       el('traceCopyStatus').textContent='连接记录已复制。';

@@ -7,20 +7,19 @@
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https://web.ifzq.gtimg.cn https://www.okx.com https://api.deepseek.com; img-src 'self' data:; object-src 'none'; form-action 'none'; base-uri 'none'">
   <title>掌上屏伴侣</title>
-  <link rel="stylesheet" href="style.css?v=7">
-  <script defer src="providers.js?v=7"></script>
-  <script defer src="ble.js?v=7"></script>
-  <script defer src="app.js?v=7"></script>
+  <link rel="stylesheet" href="style.css?v=8">
+  <script defer src="providers.js?v=8"></script>
+  <script defer src="ble.js?v=8"></script>
+  <script defer src="app.js?v=8"></script>
 </head>
 <body><main>
   <header><span class="mark" aria-hidden="true">⌁</span><strong>掌上屏伴侣</strong><span id="badge">未连接</span></header>
   <section class="connect">
     <p class="kicker">WAVESHARE COMPANION</p>
     <h1>连接随身屏</h1>
-    <p>首次配对或找不到小屏时，先点「重置并重新选择」打开设备列表，再到小屏「设备设置」点「开启 Bluefy 配对」。选中 Waveshare Companion 后保持网页打开，小屏会自动允许连接。</p>
-    <button id="connect">连接蓝牙屏</button>
-    <button id="reset" class="text" hidden>重置并重新选择</button>
-    <p id="resetHint" class="note" hidden>重置会结束本页连接，并重新打开设备列表。</p>
+    <p>以前在这个网页连过小屏，点「连接已授权小屏」即可。第一次使用时，先点「首次授权」，再到小屏的「设备设置」开启 Bluefy 配对，选择 Waveshare Companion。</p>
+    <button id="connect">连接已授权小屏</button>
+    <button id="authorize" class="text" hidden>首次授权</button>
     <output id="status" aria-live="polite">请打开小屏并开启 iPhone 蓝牙。</output>
     <p id="traceLast" hidden></p>
     <details class="trace">

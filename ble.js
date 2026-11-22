@@ -121,29 +121,46 @@
       this.phaseName = 'stopped';
       this.lastPhaseText = '';
       this.lost = null;
-      this.authorizedDevice = null;
+      this.verifiedDevice = this.grantQuery = null;
       this.activeDevice = null;
       this.ownedGatt = null;
-      this.needsReselect = false;
-      try { this.needsReselect = localStorage.getItem('waveshare-ble-select-again') === '1'; } catch (_) {}
-      this.findAuthorizedDevice();
       if (typeof window !== 'undefined') window.addEventListener('pagehide', () => this.disconnect('leave'));
     }
     get connected() { return Boolean(this.session && this.session.ready); }
 
-    // Populate the cache before a tap. The picker must be called directly from the
-    // user's gesture even when enumeration is slow, unavailable or returns nothing.
-    async findAuthorizedDevice() {
-      if (!this.bluetooth || typeof this.bluetooth.getDevices !== 'function') return;
+    async findAuthorizedDevice(ticket) {
+      this.step('读取本站已授权的小屏');
+      let saved = '';
+      try { saved = localStorage.getItem('waveshare-ble-device') || ''; } catch (_) {}
+      if (!saved && this.verifiedDevice) saved = this.verifiedDevice.id || '';
+      const previous = this.verifiedDevice && (!saved || this.verifiedDevice.id === saved) ? this.verifiedDevice : null;
+      if (typeof this.bluetooth.getDevices !== 'function') {
+        if (previous) return previous;
+        throw permanent('当前浏览器无法读取本站的授权列表。请点「首次授权」在 Bluefy 中选择一次小屏。');
+      }
+      let devices;
       try {
-        let saved;
-        try { saved = localStorage.getItem('waveshare-ble-device'); } catch (_) {}
-        const devices = await this.bluetooth.getDevices();
-        if (this.device || this.wanted) return;
-        const matches = devices.filter(d => d.name === 'Waveshare Companion');
-        this.authorizedDevice = devices.find(d => saved && d.id === saved) ||
-                                (matches.length === 1 ? matches[0] : null);
-      } catch (_) { /* Enumeration is optional; the foreground picker remains available. */ }
+        // A suspended native request may still be running when the previous wait expires.
+        if (!this.grantQuery) this.grantQuery = Promise.resolve().then(() => this.bluetooth.getDevices())
+          .finally(() => { this.grantQuery = null; });
+        devices = await deadline(this.grantQuery,7000,'读取蓝牙授权超时，请再次点「连接已授权小屏」。');
+      } catch (error) {
+        this.check(ticket);
+        if (previous && !error.timedOut && !['SecurityError','NotAllowedError'].includes(error.name)) return previous;
+        throw error;
+      }
+      this.check(ticket);
+      if (!devices || !Number.isInteger(devices.length)) throw permanent('Bluefy 未返回有效的授权列表，请再次尝试。');
+      const list = Array.from(devices);
+      this.onTrace({kind:'step',stage:'已读取本站授权列表',authorizedCount:list.length});
+      const candidates = list.filter(d => d && d.gatt);
+      const matches = saved ? candidates.filter(d => d.id === saved) :
+                              candidates.filter(d => d.name === 'Waveshare Companion');
+      if (matches.length === 1) return matches[0];
+      if (!list.length && previous) return previous;
+      if (matches.length > 1) throw permanent('本站有多个匹配的小屏，请点「首次授权」选择要使用的那一台。');
+      throw permanent(list.length ? '本站授权列表里没有匹配的小屏。可再次尝试，或点「首次授权」选择小屏。' :
+                      'Bluefy 未列出本站已授权的设备。如果还没给这个网页授权，请点「首次授权」。');
     }
 
     phase(name, text) {
@@ -158,23 +175,6 @@
     step(stage) {
       this.traceStage = stage;
       this.onTrace({kind:'step', stage});
-    }
-
-    reselect(value) {
-      this.needsReselect = value;
-      try {
-        if (value) localStorage.setItem('waveshare-ble-select-again','1');
-        else localStorage.removeItem('waveshare-ble-select-again');
-      } catch (_) {}
-    }
-
-    resetAndChoose() {
-      this.disconnect('reset');
-      this.device = this.authorizedDevice = null;
-      this.reselect(true);
-      try { localStorage.removeItem('waveshare-ble-device'); } catch (_) {}
-      // Keep the actual picker on this tap, including when an old grant still exists.
-      return this.connect({choose:true});
     }
 
     async nativeOp(device, ticket, stage, ms, operation) {
@@ -225,28 +225,26 @@
       this.phase('connecting','正在准备蓝牙连接…');
       const ticket = ++this.epoch;
       const work = (async () => {
-        let target = !choose && !this.needsReselect && (this.device || this.authorizedDevice);
-        const fromPicker = !target;
-        if (!target) {
-          this.step(choose ? '列出所有附近设备' : '选择小屏并授权');
+        let target;
+        if (choose) {
+          this.step('首次授权，选择小屏');
           this.phase('connecting','选择 Waveshare Companion，并允许蓝牙连接');
           try {
-            const filter = choose ? {acceptAllDevices:true} : {filters:[{services:[SERVICE]},{name:'Waveshare Companion'}]};
-            target = await this.bluetooth.requestDevice({...filter,optionalServices:[SERVICE]});
+            target = await this.bluetooth.requestDevice({filters:[{services:[SERVICE]},{name:'Waveshare Companion'}],
+                                                        optionalServices:[SERVICE]});
           } catch (error) {
-            if (error.name === 'NotFoundError') throw Object.assign(new Error('未选到蓝牙屏或已取消选择（NotFoundError）。先点「重置并重新选择」打开列表，再在小屏开启 Bluefy 配对。'), {nativeName:error.name});
+            if (error.name === 'NotFoundError') throw Object.assign(new Error('未选择小屏或已取消（NotFoundError）。需要首次授权时，先打开列表，再在小屏开启 Bluefy 配对。'), {nativeName:error.name});
             if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
               throw Object.assign(new Error('Bluefy 未获准搜索（' + error.name + '）。请在 iPhone「设置 → 隐私与安全性 → 蓝牙」允许 Bluefy，再点连接。'), {nativeName:error.name});
             }
             throw error;
           }
-        }
+        } else target = await this.findAuthorizedDevice(ticket);
         if (!this.wanted || ticket !== this.epoch) throw abort();
         if (!target) throw permanent('Bluefy 没有返回所选的小屏');
         this.step('页面已获设备授权');
         this.device = target;
-        await this.open(target, ticket, fromPicker);
-        try { localStorage.setItem('waveshare-ble-device', target.id); } catch (_) {}
+        await this.open(target, ticket, choose);
       })();
       this.connecting = work;
       try { await work; }
@@ -313,9 +311,8 @@
           const pending = error.serviceLookupMiss === undefined ? unseenService(error) : error.serviceLookupMiss;
           if (!pending) throw error;
           if (s.device.gatt.connected !== true || attempt >= delays.length) {
-            this.reselect(true);
             error.permanent = true;
-            error.message += '。先点「重置并重新选择」打开列表，再在小屏开启 Bluefy 配对。';
+            error.message += '。请再点「连接已授权小屏」重试。';
             throw error;
           }
           const delay = delays[attempt];
@@ -347,9 +344,8 @@
           if (error.permanent || error.timedOut || error.nativeName === 'AbortError' ||
               !(error.nativeCode === '2' || error.nativeName === 'NetworkError')) throw error;
           if (attempt >= delays.length) {
-            this.reselect(true);
             error.permanent = true;
-            error.message += '。先点「重置并重新选择」打开列表，再在小屏开启 Bluefy 配对。';
+            error.message += '。请再点「连接已授权小屏」重试。';
             throw error;
           }
           this.step('等待蓝牙设备就绪（' + (attempt + 1) + '/' + delays.length + '）');
@@ -396,7 +392,10 @@
         throw Object.assign(new Error('验证期间 iPhone 报告蓝牙设备已断开'),{nativeName:'gattserverdisconnected'});
       s.ready = true;
       s.verifiedAt = Date.now(); s.stableReads = 1;
-      if (this.needsReselect) this.reselect(false);
+      this.verifiedDevice = device;
+      if (device.id) {
+        try { localStorage.setItem('waveshare-ble-device',device.id); } catch (_) {}
+      }
       this.step('双向连接已验证');
       this.phase('connected','蓝牙伴侣已连接，双向通信正常');
       if (!this.published) { this.published = true; this.onConnection(true); }
@@ -409,7 +408,7 @@
     disconnect(reason = 'user') {
       if (!this.wanted && !this.connecting && !this.published && !this.activeDevice) return;
       if (this.wanted || this.connecting || this.published)
-        this.onTrace({kind:'end',stage:reason === 'reset' ? '手动重置网页连接' : reason === 'leave' ? '离开网页，结束同步' :
+        this.onTrace({kind:'end',stage:reason === 'leave' ? '离开网页，结束同步' :
                       this.connected ? '手动断开同步' : '手动取消连接'});
       this.wanted = false;
       clearTimeout(this.retryTimer);
