@@ -151,7 +151,7 @@
     catch(_) {el('status').textContent='请在地址栏长按并复制这个网页地址。';}
   };
   el('traceCopy').onclick=async()=>{
-    const report=['小屏连接记录 v6',...traceRows].concat(lastIssue ? ['最近一次异常 '+lastIssue] : []).join('\n');
+    const report=['小屏连接记录 v7',...traceRows].concat(lastIssue ? ['最近一次异常 '+lastIssue] : []).join('\n');
     try {
       await navigator.clipboard.writeText(report);
       el('traceCopyStatus').textContent='连接记录已复制。';

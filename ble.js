@@ -6,6 +6,8 @@
   const NOTIFY = SERVICE.replace('0001-', '0004-');
   const encode = new TextEncoder(), decode = new TextDecoder('utf-8', {fatal: true});
   const MAX = 8192, PAGE = 11, noop = () => {};
+  // A just-selected board can still be advertising in its first 10 discovery-only seconds.
+  const PICKER_DELAYS = [2000, 4000, 6500];
   const abort = () => new Error('蓝牙连接已结束');
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
   const permanent = message => Object.assign(new Error(message), {permanent:true});
@@ -224,6 +226,7 @@
       const ticket = ++this.epoch;
       const work = (async () => {
         let target = !choose && !this.needsReselect && (this.device || this.authorizedDevice);
+        const fromPicker = !target;
         if (!target) {
           this.step(choose ? '列出所有附近设备' : '选择小屏并授权');
           this.phase('connecting','选择 Waveshare Companion，并允许蓝牙连接');
@@ -231,7 +234,7 @@
             const filter = choose ? {acceptAllDevices:true} : {filters:[{services:[SERVICE]},{name:'Waveshare Companion'}]};
             target = await this.bluetooth.requestDevice({...filter,optionalServices:[SERVICE]});
           } catch (error) {
-            if (error.name === 'NotFoundError') throw Object.assign(new Error('未选到蓝牙屏或已取消选择（NotFoundError）。请在小屏开启 Bluefy 配对，倒计时出现后点「重置并重新选择」。'), {nativeName:error.name});
+            if (error.name === 'NotFoundError') throw Object.assign(new Error('未选到蓝牙屏或已取消选择（NotFoundError）。先点「重置并重新选择」打开列表，再在小屏开启 Bluefy 配对。'), {nativeName:error.name});
             if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
               throw Object.assign(new Error('Bluefy 未获准搜索（' + error.name + '）。请在 iPhone「设置 → 隐私与安全性 → 蓝牙」允许 Bluefy，再点连接。'), {nativeName:error.name});
             }
@@ -242,7 +245,7 @@
         if (!target) throw permanent('Bluefy 没有返回所选的小屏');
         this.step('页面已获设备授权');
         this.device = target;
-        await this.open(target, ticket);
+        await this.open(target, ticket, fromPicker);
         try { localStorage.setItem('waveshare-ble-device', target.id); } catch (_) {}
       })();
       this.connecting = work;
@@ -302,20 +305,21 @@
     async discoverService(s, server) {
       // Give iOS time to finish encrypted discovery on this specific connection.
       // All selectors are read-only. Explicit cancellation invalidates the ticket.
+      const delays = s.fromPicker ? PICKER_DELAYS : [2000,3000];
       for (let attempt = 0; ; attempt++) {
         try { return await this.lookup(s,server,SERVICE,'查找伴侣服务'); }
         catch (error) {
           this.check(s.ticket);
           const pending = error.serviceLookupMiss === undefined ? unseenService(error) : error.serviceLookupMiss;
           if (!pending) throw error;
-          if (s.device.gatt.connected !== true || attempt >= 2) {
+          if (s.device.gatt.connected !== true || attempt >= delays.length) {
             this.reselect(true);
             error.permanent = true;
-            error.message += '。请在小屏「设备设置」开启 Bluefy 配对，再点「重置并重新选择」。';
+            error.message += '。先点「重置并重新选择」打开列表，再在小屏开启 Bluefy 配对。';
             throw error;
           }
-          const delay = attempt === 0 ? 2000 : 3000;
-          this.step('等待小屏服务就绪（' + (attempt + 1) + '/2）');
+          const delay = delays[attempt];
+          this.step('等待小屏服务就绪（' + (attempt + 1) + '/' + delays.length + '）');
           this.phase('connecting','小屏服务还未出现，' + delay / 1000 + ' 秒后在当前连接重试。');
           await wait(delay);
           this.check(s.ticket);
@@ -324,7 +328,8 @@
       }
     }
 
-    async connectServer(device,ticket) {
+    async connectServer(device,ticket,fromPicker) {
+      const delays = fromPicker ? PICKER_DELAYS : [800,1400];
       for (let attempt = 0; ; attempt++) {
         this.check(ticket);
         this.step('连接蓝牙设备');
@@ -341,21 +346,22 @@
           this.check(ticket);
           if (error.permanent || error.timedOut || error.nativeName === 'AbortError' ||
               !(error.nativeCode === '2' || error.nativeName === 'NetworkError')) throw error;
-          if (attempt >= 2) {
+          if (attempt >= delays.length) {
             this.reselect(true);
             error.permanent = true;
-            error.message += '。在小屏「设备设置」开启 Bluefy 配对，再点「重置并重新选择」。';
+            error.message += '。先点「重置并重新选择」打开列表，再在小屏开启 Bluefy 配对。';
             throw error;
           }
-          this.step('等待蓝牙设备就绪（' + (attempt + 1) + '/2）');
-          this.phase('connecting','Bluefy 暂未连上，正在用已授权的小屏重试…');
-          await wait(attempt === 0 ? 800 : 1400);
+          this.step('等待蓝牙设备就绪（' + (attempt + 1) + '/' + delays.length + '）');
+          this.phase('connecting',fromPicker ? '已选中小屏，请保持网页打开，正在等待小屏允许连接。' :
+                     'Bluefy 暂未连上，正在用已授权的小屏重试…');
+          await wait(delays[attempt]);
         }
       }
     }
 
-    async open(device, ticket) {
-      this.phase('connecting','正在连接蓝牙设备…');
+    async open(device, ticket, fromPicker = false) {
+      this.phase('connecting',fromPicker ? '已选中小屏，请保持网页打开，正在连接…' : '正在连接蓝牙设备…');
       if (!device.gatt) throw permanent('Bluefy 没有提供这台设备的蓝牙连接接口');
       this.activeDevice = device;
       this.lost = () => {
@@ -370,8 +376,8 @@
         try { device.addEventListener('gattserverdisconnected', this.lost); }
         catch (_) { /* Read/write failures still report a dropped connection. */ }
       }
-      const server = await this.connectServer(device,ticket);
-      const connection = {device,ticket};
+      const server = await this.connectServer(device,ticket,fromPicker);
+      const connection = {device,ticket,fromPicker};
       const service = await this.discoverService(connection,server);
       const rx = await this.lookup(connection,service,RX,'查找写入通道',true);
       const tx = await this.lookup(connection,service,TX,'查找读取通道',true);
