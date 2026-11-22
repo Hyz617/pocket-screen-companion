@@ -3,9 +3,12 @@
   'use strict';
   const SERVICE = '905d0001-664a-4b83-9f54-e53e5ecff006';
   const RX = SERVICE.replace('0001-', '0002-'), TX = SERVICE.replace('0001-', '0003-');
+  const NOTIFY = SERVICE.replace('0001-', '0004-');
   const encode = new TextEncoder(), decode = new TextDecoder('utf-8', {fatal: true});
   const MAX = 8192, PAGE = 11, noop = () => {};
   const abort = () => new Error('蓝牙连接已结束');
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const permanent = message => Object.assign(new Error(message), {permanent:true});
 
   function limited(text, bytes) {
     let used = 0, result = '';
@@ -18,14 +21,22 @@
   }
 
   function toBytes(value) {
-    if (value instanceof ArrayBuffer) return new Uint8Array(value);
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    if (Object.prototype.toString.call(value) === '[object ArrayBuffer]') return new Uint8Array(value);
+    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    // Some native bridges serialize binary as a byte array or Node-style Buffer.
+    const sequence = value && value.type === 'Buffer' ? value.data : value;
+    if (sequence && typeof sequence === 'object' && Number.isInteger(sequence.length) &&
+        sequence.length >= 0 && sequence.length <= 512) {
+      const bytes = Array.from(sequence);
+      if (bytes.every(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255)) return Uint8Array.from(bytes);
+    }
+    throw permanent('蓝牙读取返回了不支持的数据格式 ' + Object.prototype.toString.call(value));
   }
 
   function deadline(promise, ms, message) {
     let clock;
     return Promise.race([promise, new Promise((_, reject) => {
-      clock = setTimeout(() => reject(new Error(message)), ms);
+      clock = setTimeout(() => reject(Object.assign(new Error(message), {timedOut:true})), ms);
     })]).finally(() => clearTimeout(clock));
   }
 
@@ -76,6 +87,7 @@
       this.ai = options.ai;
       this.onStatus = options.onStatus || noop;
       this.onConnection = options.onConnection || noop;
+      this.onPhase = options.onPhase || noop;
       this.onAnswer = options.onAnswer || noop;
       this.journal = options.journal || new AnswerJournal();
       this.bluetooth = options.bluetooth || (typeof navigator !== 'undefined' && navigator.bluetooth);
@@ -87,18 +99,69 @@
       this.aiJobs = new Map();
       this.histories = new Map();
       this.shownAnswers = new Set();
-      this.lost = () => {
-        if (this.device && !this.device.gatt.connected) this.closed();
-      };
+      this.readOnlyDevices = new Set();
+      this.native = new Map();
+      this.published = false;
+      this.phaseName = 'stopped';
+      this.lastPhaseText = '';
+      this.lost = null;
+      if (typeof window !== 'undefined') window.addEventListener('pagehide', () => this.disconnect());
     }
     get connected() { return Boolean(this.session && this.session.ready); }
+
+    phase(name, text) {
+      this.phaseName = name;
+      this.lastPhaseText = text;
+      this.onPhase(name, text);
+      this.onStatus(text);
+    }
+
+    check(ticket) { if (ticket !== this.epoch || !this.wanted) throw abort(); }
+
+    async nativeOp(device, ticket, stage, ms, operation) {
+      this.check(ticket);
+      // A timeout rejects our wait, not the platform operation. Retain its real
+      // promise across attempts so a late callback cannot overlap another ATT call.
+      const deviceKey = device.id || device;
+      const earlier = this.native.get(deviceKey);
+      if (earlier) {
+        try { await deadline(earlier, 10000, stage + '：上次蓝牙操作仍未结束，请重新打开网页'); }
+        catch (error) { if (error.timedOut) error.permanent = true; throw error; }
+      }
+      this.check(ticket);
+      const raw = Promise.resolve().then(() => { this.check(ticket); return operation(); });
+      const settled = raw.then(noop, noop);
+      this.native.set(deviceKey, settled);
+      settled.then(() => { if (this.native.get(deviceKey) === settled) this.native.delete(deviceKey); });
+      try {
+        const value = await deadline(raw, ms, '等待 ' + ms / 1000 + ' 秒后仍无回执');
+        this.check(ticket);
+        return value;
+      } catch (cause) {
+        this.check(ticket);
+        const reason = ((cause && cause.name && cause.name !== 'Error') ? cause.name + ' ' : '') +
+                       ((cause && cause.message) || String(cause));
+        const error = new Error(stage + '：' + reason);
+        error.nativeName = cause && cause.name;
+        error.timedOut = Boolean(cause && cause.timedOut);
+        error.permanent = Boolean(cause && (cause.permanent || ['SecurityError','NotAllowedError',
+          'NotFoundError','NotSupportedError'].includes(cause.name)));
+        throw error;
+      }
+    }
 
     async connect({choose = false} = {}) {
       if (this.connected) return;
       if (this.connecting) return this.connecting;
-      if (!this.bluetooth) throw new Error('请在 iPhone 的 Bluefy 中通过 HTTPS 打开此页');
+      if (!this.bluetooth) {
+        const error = permanent('请在 iPhone 的 Bluefy 中通过 HTTPS 打开此页');
+        this.phase('failed',error.message);
+        throw error;
+      }
       this.wanted = true;
+      this.retryCount = 0;
       clearTimeout(this.retryTimer);
+      this.phase('connecting','正在准备蓝牙连接…');
       const ticket = ++this.epoch;
       const work = (async () => {
         let target = !choose && this.device;
@@ -106,17 +169,19 @@
         try { saved = localStorage.getItem('waveshare-ble-device'); } catch (_) {}
         if (!target && !choose && saved && this.bluetooth.getDevices) {
           try { target = (await this.bluetooth.getDevices()).find(d => d.id === saved); } catch (_) {}
+          if (!target) {
+            // A fresh chooser may need a new tap on iOS after this asynchronous lookup.
+            try { localStorage.removeItem('waveshare-ble-device'); } catch (_) {}
+          }
         }
         if (!target) {
-          this.onStatus('选择 Waveshare Companion，并允许蓝牙连接');
+          this.phase('connecting','选择 Waveshare Companion，并允许蓝牙连接');
           target = await this.bluetooth.requestDevice({
-            filters: [{namePrefix: 'Waveshare'}], optionalServices: [SERVICE]
+            filters: [{services:[SERVICE]}, {namePrefix:'Waveshare'}], optionalServices: [SERVICE]
           });
         }
         if (!this.wanted || ticket !== this.epoch) throw abort();
-        if (this.device) this.device.removeEventListener('gattserverdisconnected', this.lost);
         this.device = target;
-        target.addEventListener('gattserverdisconnected', this.lost);
         await this.open(target, ticket);
         try { localStorage.setItem('waveshare-ble-device', target.id); } catch (_) {}
       })();
@@ -124,61 +189,85 @@
       try { await work; }
       catch (error) {
         if (this.epoch === ticket) {
-          this.wanted = false;
-          this.closed();
+          this.closed(error, false);
         }
         throw error;
       } finally { if (this.connecting === work) this.connecting = null; }
     }
 
     async open(device, ticket) {
-      this.onStatus('正在连接蓝牙设备…');
-      const check = () => { if (!this.wanted || this.epoch !== ticket) throw abort(); };
-      const server = await deadline(device.gatt.connect(), 20000, '蓝牙连接超时');
-      check();
-      const service = await deadline(server.getPrimaryService(SERVICE), 8000, '未发现伴侣服务，请检查固件版本');
-      const rx = await deadline(service.getCharacteristic(RX), 8000, '找不到写入通道');
-      const tx = await deadline(service.getCharacteristic(TX), 8000, '找不到读取通道');
-      check();
-      const s = {device, rx, tx, ready: false, tail: Promise.resolve(), lastAck: 0, marketKey: '', marketAt: 0,
+      this.phase('connecting','正在连接蓝牙设备…');
+      const op = (label,ms,fn) => this.nativeOp(device,ticket,label,ms,fn);
+      const server = await op('连接设备',20000,async () => {
+        const result = await device.gatt.connect();
+        if (ticket !== this.epoch && !this.wanted && device.gatt.connected) device.gatt.disconnect();
+        return result;
+      });
+      const service = await op('查找伴侣服务',8000,() => server.getPrimaryService(SERVICE));
+      const rx = await op('查找写入特征',8000,() => service.getCharacteristic(RX));
+      const tx = await op('查找读取特征',8000,() => service.getCharacteristic(TX));
+      const s = {device, ticket, rx, tx, ready: false, tail: Promise.resolve(), lastAck: 0, marketKey: '', marketAt: 0,
                  aiKey: '', aiNext: 0};
       this.session = s;
-      await this.serial(s, () => this.write(s, Uint8Array.of(72))); // H
-      check();
+      this.lost = () => {
+        if (this.session === s && s.ready && ticket === this.epoch && !device.gatt.connected)
+          this.closed(new Error('iPhone 报告蓝牙设备已断开'));
+      };
+      device.addEventListener('gattserverdisconnected', this.lost);
+      this.phase('verifying','已找到设备，正在验证双向蓝牙通信…');
+      await this.serial(s, () => this.retryRead(s, '握手', () => this.write(s, Uint8Array.of(72))));
+      await this.serial(s, () => this.tryNotifications(s, service));
+      const first = await this.serial(s, () => this.snapshot(s));
+      this.check(ticket);
       s.ready = true;
-      this.retryCount = 0;
-      this.onConnection(true);
-      this.onStatus('蓝牙伴侣已连接');
-      this.poll(s);
+      s.verifiedAt = Date.now(); s.stableReads = 1;
+      this.phase('connected','蓝牙伴侣已连接，双向通信正常');
+      if (!this.published) { this.published = true; this.onConnection(true); }
+      if (this.session !== s) return;
+      this.considerMarket(s, first.market);
+      this.considerAI(s, first.ai, first.boot);
+      s.clock = setTimeout(() => this.poll(s), 1600);
     }
 
     disconnect() {
       this.wanted = false;
       clearTimeout(this.retryTimer);
       for (const job of this.aiJobs.values()) job.controller.abort();
-      this.closed();
-      this.onStatus('已停止蓝牙同步');
+      this.connecting = null;
+      this.closed(null, false);
     }
 
-    closed() {
+    closed(error, retry = true) {
       const s = this.session;
       this.session = null;
       ++this.epoch;
+      clearTimeout(this.retryTimer);
       if (s) {
         clearTimeout(s.clock);
+        this.detachNotifications(s);
         if (s.marketCtrl) s.marketCtrl.abort();
       }
+      if (this.device && this.lost) this.device.removeEventListener('gattserverdisconnected',this.lost);
+      this.lost = null;
       if (this.device && this.device.gatt.connected) this.device.gatt.disconnect();
-      this.onConnection(false);
-      if (!this.wanted || !this.device) return;
-      this.onStatus('蓝牙已断开，正在等待重连…');
-      clearTimeout(this.retryTimer);
-      const backoff = Math.min(12000, 1000 * Math.pow(2, Math.min(this.retryCount++, 4)));
+      if (this.published) { this.published = false; this.onConnection(false); }
+      const detail = error && (error.message || String(error));
+      if (!retry || !this.wanted || !this.device || (error && error.permanent) || this.retryCount >= 3) {
+        this.wanted = false;
+        this.phase(error ? 'failed' : 'stopped', detail ? '同步已停止。' + detail : '已停止蓝牙同步');
+        return;
+      }
+      const backoff = 1500 * Math.pow(2, this.retryCount++);
+      this.phase('recovering', (detail || '蓝牙已断开') + '。正在重连（' + this.retryCount + '/3）');
+      const waiting = this.epoch;
       this.retryTimer = setTimeout(async () => {
-        if (!this.wanted || this.session) return;
+        if (waiting !== this.epoch || !this.wanted || this.session || this.connecting) return;
         const ticket = ++this.epoch;
-        try { await this.open(this.device, ticket); }
-        catch (_) { if (ticket === this.epoch && this.wanted) this.closed(); }
+        const work = this.open(this.device, ticket);
+        this.connecting = work;
+        try { await work; }
+        catch (error) { if (ticket === this.epoch && this.wanted) this.closed(error); }
+        finally { if (this.connecting === work) this.connecting = null; }
       }, backoff);
     }
 
@@ -187,7 +276,7 @@
         if (this.session !== s || !this.wanted) throw abort();
         try { return await task(); }
         catch (error) {
-          if (s.ready && this.session === s && !error.peerRejected) this.closed();
+          if (s.ready && this.session === s && !error.peerRejected) this.closed(error);
           throw error;
         }
       });
@@ -198,36 +287,150 @@
     async write(s, data) {
       if (this.session !== s || !this.wanted) throw abort();
       if (data.length > 20) throw new Error('蓝牙分片超长');
-      const fn = s.rx.writeValueWithResponse || s.rx.writeValue;
-      if (!fn || (s.rx.properties && s.rx.properties.write === false)) throw new Error('设备不支持带回执的写入');
-      await deadline(fn.call(s.rx, data), 9000, '蓝牙写入未获回执');
+      const fn = s.legacyWrite ? s.rx.writeValue : s.rx.writeValueWithResponse || s.rx.writeValue;
+      if (!fn || (s.rx.properties && s.rx.properties.write === false)) throw permanent('设备不支持带回执的写入');
+      const stage = '蓝牙写入 ' + String.fromCharCode(data[0]);
+      try {
+        await this.nativeOp(s.device,s.ticket,stage,9000,() => fn.call(s.rx, data));
+      } catch (error) {
+        const props = s.rx.properties || {};
+        // Probe only with a read selector or greeting. Never repeat a D write
+        // (watch lists, paid questions, answers) after an ambiguous result.
+        if (data[0] === 68 || s.triedLegacy || error.timedOut || fn !== s.rx.writeValueWithResponse ||
+            typeof s.rx.writeValue !== 'function' || props.write !== true || props.writeWithoutResponse !== false ||
+            !(error.nativeName === 'NotSupportedError' || /not implemented/i.test(error.message))) throw error;
+        s.triedLegacy = true;
+        await this.nativeOp(s.device,s.ticket,stage + '（兼容模式）',9000,() => s.rx.writeValue(data));
+        s.legacyWrite = true;
+      }
       s.lastAck = Date.now();
     }
 
-    async readState(s, opcode = 112) {
+    async retryRead(s, stage, operation) {
+      for (let attempt = 0; ; attempt++) {
+        this.check(s.ticket);
+        try { return await operation(); }
+        catch (error) {
+          this.check(s.ticket);
+          if (error.permanent || error.timedOut || !s.device.gatt.connected || attempt >= 2) throw error;
+          this.phase('recovering',stage + '暂未成功，正在原连接重试。' + (error.message || error));
+          await wait(attempt === 0 ? 220 : 650);
+        }
+      }
+    }
+
+    detachNotifications(s) {
+      if (s.notice && s.noticeHandler)
+        s.notice.removeEventListener('characteristicvaluechanged', s.noticeHandler);
+      if (s.waitingNotice) s.waitingNotice.finish(null);
+      s.notice = s.noticeHandler = s.waitingNotice = null;
+    }
+
+    async tryNotifications(s, service) {
+      if (this.readOnlyDevices.has(s.device.id)) return;
+      try {
+        const ch = await this.nativeOp(s.device,s.ticket,'查找可选通知通道',4000,
+          () => service.getCharacteristic(NOTIFY));
+        if (!ch || typeof ch.startNotifications !== 'function' || typeof ch.addEventListener !== 'function') return;
+        s.notice = ch;
+        s.noticeHandler = event => {
+          const waiting = s.waitingNotice;
+          if (!waiting || this.session !== s || s.ticket !== this.epoch || !s.notice) return;
+          try {
+            const bytes = toBytes(event.target.value);
+            if (bytes.length < 10 || bytes.length > 20 || bytes[0] !== 74) return;
+            const header = new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+            const id = header.getUint32(1,true), total = header.getUint16(5,true), at = header.getUint16(7,true);
+            if (!id || !total || total > MAX || at !== waiting.offset || at + bytes.length - 9 > total) return;
+            if (waiting.id) {
+              if (id !== waiting.id || total !== waiting.total) return;
+            } else if (s.lastFrameId) {
+              // A previous first-page notification can arrive during the next poll.
+              const distance = (id - s.lastFrameId) >>> 0;
+              if (!distance || distance >= 0x80000000) return;
+            }
+            waiting.finish(bytes.slice()); // The native characteristic buffer can be reused.
+          } catch (_) { /* Ignore malformed or unrelated events; the read channel is the fallback. */ }
+        };
+        ch.addEventListener('characteristicvaluechanged', s.noticeHandler);
+        await this.nativeOp(s.device,s.ticket,'订阅可选通知通道',5500,() => ch.startNotifications());
+      } catch (error) {
+        this.detachNotifications(s);
+        this.check(s.ticket);
+        if (!s.device.gatt.connected) throw error;
+        if (error.timedOut) this.readOnlyDevices.add(s.device.id);
+        // Earlier firmware only advertises the encrypted RX and TX characteristics.
+      }
+    }
+
+    async noticePage(s, packet, expectedId, total, offset) {
+      // Install the waiter first: the board can notify before the acknowledged write returns.
+      let finish;
+      const page = new Promise(resolve => { finish = resolve; });
+      const waiting = {id:expectedId, total, offset, finish};
+      s.waitingNotice = waiting;
+      try {
+        const request = packet.slice();
+        request[0] = packet[0] === 119 ? 109 : 110; // m for watch, n for state
+        await this.write(s,request);
+        const bytes = await deadline(page,2200,'等待通知页超时');
+        if (!bytes) throw abort();
+        return bytes;
+      } finally { if (s.waitingNotice === waiting) s.waitingNotice = null; }
+    }
+
+    async snapshot(s, opcode = 112) {
       // On iOS the page may have been suspended while the system HID/AMS
       // connection remained alive. Renew the app lease before starting a snapshot.
-      if (s.ready && Date.now() - s.lastAck > 9500) await this.write(s, Uint8Array.of(72));
+      if (s.lastAck && Date.now() - s.lastAck > 9500) await this.write(s, Uint8Array.of(72));
       const body = [];
       let id = 0, total = 0;
       do {
         const packet = new Uint8Array(7), view = new DataView(packet.buffer);
         packet[0] = opcode; // p or w: short response even at ATT MTU 23
         view.setUint32(1, id, true); view.setUint16(5, body.length, true);
-        await this.write(s, packet);
-        const data = toBytes(await deadline(s.tx.readValue(), 9000, '蓝牙读取超时'));
-        if (data.length < 10 || data.length > 20 || data[0] !== 74) throw new Error('设备返回了无效的协议页');
-        const head = new DataView(data.buffer, data.byteOffset, data.byteLength);
-        const gotId = head.getUint32(1, true), gotTotal = head.getUint16(5, true);
-        if (!gotId || gotTotal < 1 || gotTotal > MAX || head.getUint16(7,true) !== body.length ||
-            body.length + data.length - 9 > gotTotal || (body.length && (gotId !== id || total !== gotTotal))) {
-          throw new Error('蓝牙数据顺序异常');
-        }
-        id = gotId; total = gotTotal;
-        for (const byte of data.subarray(9)) body.push(byte);
-      } while (body.length < total);
-      const state = JSON.parse(decode.decode(Uint8Array.from(body)));
-      if (state.v !== 1) throw new Error('伴侣固件协议版本不符');
+        const pageName = (opcode === 119 ? '自选' : '状态') + '页，偏移 ' + body.length;
+        const data = await this.retryRead(s, pageName, async () => {
+          let bytes;
+          if (s.notice) {
+            try { bytes = await this.noticePage(s,packet,id,total,body.length); }
+            catch (error) {
+              this.check(s.ticket);
+              if (!s.device.gatt.connected) throw error;
+              this.detachNotifications(s);
+              this.readOnlyDevices.add(s.device.id);
+              this.phase('recovering','通知通道未完成，改用同一连接读取。' + error.message);
+              if (body.length) return null; // Restart at page zero rather than mix two snapshots.
+            }
+          }
+          if (!bytes) {
+            await this.write(s, packet);
+            const value = await this.nativeOp(s.device,s.ticket,'蓝牙读取' + pageName,9000,() => s.tx.readValue());
+            bytes = toBytes(value == null ? s.tx.value : value);
+          }
+          if (bytes.length < 10 || bytes.length > 20 || bytes[0] !== 74)
+            throw new Error(pageName + '：协议头无效，收到 ' + bytes.length + ' 字节');
+          const head = new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+          const fid = head.getUint32(1,true), size = head.getUint16(5,true), offset = head.getUint16(7,true);
+          if (!fid || !size || size > MAX || offset !== body.length || offset + bytes.length - 9 > size ||
+              (body.length && (id !== fid || total !== size))) {
+            throw new Error(pageName + '：返回偏移 ' + offset + '，快照长度 ' + size + '，数据顺序异常');
+          }
+          id = fid; total = size; s.lastFrameId = fid;
+          return bytes;
+        });
+        if (!data) { id = total = 0; body.length = 0; }
+        else for (const byte of data.subarray(9)) body.push(byte);
+      } while (!total || body.length < total);
+      let state;
+      try { state = JSON.parse(decode.decode(Uint8Array.from(body))); }
+      catch (error) { throw permanent('设备状态无法解码：' + error.message); }
+      if (!state || state.v !== 1) throw permanent('伴侣固件协议版本不符');
+      if (opcode === 112 && (!Object.prototype.hasOwnProperty.call(state,'ai') || !Object.prototype.hasOwnProperty.call(state,'market')))
+        throw permanent('蓝牙状态缺少 AI 或行情字段，请核对固件版本');
+      if (opcode === 119 && (!state.watch || !Array.isArray(state.watch.stocks) || !Array.isArray(state.watch.pairs)))
+        throw permanent('设备返回的自选清单格式不正确，请核对固件版本');
+      if (s.ready && this.phaseName === 'recovering') this.phase('connected','已在原蓝牙连接恢复同步');
       return state;
     }
 
@@ -246,7 +449,7 @@
           try {
             await this.write(session, packet);
           } catch (error) {
-            if (offset + part.length !== raw.length || !session.device.gatt.connected) throw error;
+            if (error.timedOut || error.permanent || offset + part.length !== raw.length || !session.device.gatt.connected) throw error;
             // The final ACK also reports application-level rejection. A swipe,
             // closed page, or busy question must not tear down an intact link.
             // The next independent poll verifies the radio rather than replaying D.
@@ -256,7 +459,7 @@
               ask:'小屏未接收新问题，如已有问题，请等待回复后再试',
               watch:'自选未保存，请核对代码并重试'
             };
-            const rejected = new Error(details[object.op] || '设备未接受这条消息');
+            const rejected = new Error((details[object.op] || '设备未接受这条消息') + '。' + (error.message || error));
             rejected.peerRejected = true;
             throw rejected;
           }
@@ -266,12 +469,13 @@
 
     async poll(s) {
       try {
-        const state = await this.serial(s, () => this.readState(s));
+        const state = await this.serial(s, () => this.snapshot(s));
         if (this.session !== s) return;
+        if (++s.stableReads >= 3 && Date.now() - s.verifiedAt >= 10000) this.retryCount = 0;
         this.considerMarket(s, state.market);
         this.considerAI(s, state.ai, state.boot);
       } catch (error) {
-        if (this.session === s) { this.onStatus(error.message); this.closed(); }
+        if (this.session === s) this.closed(error);
         return;
       }
       if (this.session === s) s.clock = setTimeout(() => this.poll(s), 1600);
@@ -381,7 +585,7 @@
     async readWatch() {
       const s = this.session;
       if (!s || !s.ready) throw abort();
-      const result = await this.serial(s, () => this.readState(s, 119)); // w
+      const result = await this.serial(s, () => this.snapshot(s, 119)); // w
       if (!result.watch || !Array.isArray(result.watch.stocks) || !Array.isArray(result.watch.pairs))
         throw new Error('未能读取设备原有自选');
       return {stocks:result.watch.stocks.slice(), pairs:result.watch.pairs.slice()};

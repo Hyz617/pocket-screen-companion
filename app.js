@@ -1,6 +1,7 @@
 (() => {
   const el = id => document.getElementById(id);
-  let connected=false, connecting=false, saving=false, loading=false, asking=false, listsReady=false, session=0, answerTimer;
+  let connected=false, connecting=false, phase='stopped', saving=false, loading=false, asking=false, listsReady=false, session=0, answerTimer;
+  const phases={connecting:'连接中',verifying:'正在验证',recovering:'恢复同步中',connected:'已连接',stopped:'未连接',failed:'连接失败'};
   const link = new PhoneLink({
     market: async (request,options) => {
       const quote=await PhoneProviders.market(request,options);
@@ -12,10 +13,15 @@
       clearTimeout(answerTimer);
       connected=value; session++; listsReady=false; loading=false; saving=false; asking=false;
       el('quote').hidden=true;
-      el('badge').textContent=value?'已连接':'未连接';
-      el('badge').classList.toggle('live',value);
       el('watchStatus').textContent=value?'正在读取小屏自选…':'连接后可编辑小屏自选。';
       if (value) loadLists();
+      controls();
+    },
+    onPhase: (next,detail) => {
+      phase=next;
+      el('badge').textContent=phases[next]||'未连接';
+      el('badge').classList.toggle('live',next==='connected');
+      if(detail) el('status').textContent=detail;
       controls();
     },
     onStatus: message => { el('status').textContent=message; },
@@ -49,16 +55,18 @@
     return list;
   }
   function controls() {
-    el('connect').textContent=connecting?'连接中…':connected?'断开蓝牙屏':'连接蓝牙屏';
-    el('connect').disabled=connecting;
-    el('read').disabled=!connected||loading||saving;
+    const pending=phase==='recovering'||phase==='verifying'||phase==='connecting';
+    const usable=connected&&phase==='connected';
+    el('connect').textContent=pending?'取消连接':connected?'断开蓝牙屏':connecting?'连接中…':'连接蓝牙屏';
+    el('connect').disabled=connecting&&!pending;
+    el('read').disabled=!usable||loading||saving;
     let valid=true;
     for (const id of ['stocks','pairs']) {
       el(id).disabled=!listsReady||saving||loading;
       try {preview(id);} catch(e) {el(id+'Preview').textContent=e.message; valid=false;}
     }
-    el('save').disabled=!connected||!listsReady||loading||saving||!valid;
-    el('ask').disabled=!connected||asking||!el('key').value.trim()||!el('question').value.trim();
+    el('save').disabled=!usable||!listsReady||loading||saving||!valid;
+    el('ask').disabled=!usable||asking||!el('key').value.trim()||!el('question').value.trim();
   }
   async function loadLists() {
     const ticket=session; loading=true; controls();
@@ -88,10 +96,10 @@
     chart.setAttribute('aria-label',quote.interval+'走势，最新价 '+quote.price+'，最低 '+min+'，最高 '+max);
   }
   el('connect').onclick=async()=>{
-    if(connected) {link.disconnect();return;}
+    if(connected||phase==='recovering'||phase==='verifying'||phase==='connecting') {link.disconnect();return;}
     connecting=true; controls();
     try {await link.connect();}
-    catch(e) {el('status').textContent=e.name==='NotFoundError'?'未选到设备。请在小屏的设备设置中开启伴侣搜索，再点连接。':(e.message||'蓝牙连接失败');}
+    catch(e) {if(phase!=='stopped'&&phase!=='failed') el('status').textContent=e.name==='NotFoundError'?'未选到设备。请在小屏的设备设置中开启伴侣搜索，再点连接。':(e.message||'蓝牙连接失败');}
     finally {connecting=false; controls();}
   };
   el('copy').onclick=async()=>{
