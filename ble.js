@@ -16,6 +16,12 @@
                   raw.match(/\b(?:code|status)\s*[:= ]\s*(-?\d{1,6}|0x[\da-f]{1,8})\b/i);
     return match ? match[1] : '';
   }
+  function unseenService(error) {
+    if (!error || error.timedOut || ['SecurityError','NotAllowedError','NotSupportedError','AbortError']
+        .includes(error.nativeName)) return false;
+    return error.nativeCode === '2' || error.nativeName === 'NotFoundError' ||
+           /(?:^|[：\s])NOT_FOUND(?:$|\s)/i.test(error.message || '');
+  }
 
   function limited(text, bytes) {
     let used = 0, result = '';
@@ -114,6 +120,10 @@
       this.lastPhaseText = '';
       this.lost = null;
       this.authorizedDevice = null;
+      this.activeDevice = null;
+      this.ownedGatt = null;
+      this.needsReselect = false;
+      try { this.needsReselect = localStorage.getItem('waveshare-ble-select-again') === '1'; } catch (_) {}
       this.findAuthorizedDevice();
       if (typeof window !== 'undefined') window.addEventListener('pagehide', () => this.disconnect('leave'));
     }
@@ -146,6 +156,23 @@
     step(stage) {
       this.traceStage = stage;
       this.onTrace({kind:'step', stage});
+    }
+
+    reselect(value) {
+      this.needsReselect = value;
+      try {
+        if (value) localStorage.setItem('waveshare-ble-select-again','1');
+        else localStorage.removeItem('waveshare-ble-select-again');
+      } catch (_) {}
+    }
+
+    resetAndChoose() {
+      this.disconnect('reset');
+      this.device = this.authorizedDevice = null;
+      this.reselect(true);
+      try { localStorage.removeItem('waveshare-ble-device'); } catch (_) {}
+      // Keep the actual picker on this tap, including when an old grant still exists.
+      return this.connect();
     }
 
     async nativeOp(device, ticket, stage, ms, operation) {
@@ -196,9 +223,9 @@
       this.phase('connecting','正在准备蓝牙连接…');
       const ticket = ++this.epoch;
       const work = (async () => {
-        let target = !choose && (this.device || this.authorizedDevice);
+        let target = !choose && !this.needsReselect && (this.device || this.authorizedDevice);
         if (!target) {
-          this.step('选择小屏并授权');
+          this.step(this.needsReselect && !choose ? '重新选择蓝牙屏' : '选择小屏并授权');
           this.phase('connecting','选择 Waveshare Companion，并允许蓝牙连接');
           try {
             const filter = choose ? {acceptAllDevices:true} : {filters:[{services:[SERVICE]}]};
@@ -254,6 +281,7 @@
         error.message += '。首次查询结果：' + direct.message;
         error.directCode = direct.nativeCode;
         error.inventory = '列出已授权' + type + '失败';
+        error.serviceLookupMiss = !characteristic && unseenService(direct) && unseenService(error);
         throw error;
       }
       const list = items ? Array.from(items) : [];
@@ -270,30 +298,80 @@
       return found;
     }
 
+    async discoverService(s, server) {
+      // Give iOS time to finish encrypted discovery on this specific connection.
+      // All selectors are read-only. Explicit cancellation invalidates the ticket.
+      for (let attempt = 0; ; attempt++) {
+        try { return await this.lookup(s,server,SERVICE,'查找伴侣服务'); }
+        catch (error) {
+          this.check(s.ticket);
+          const pending = error.serviceLookupMiss === undefined ? unseenService(error) : error.serviceLookupMiss;
+          if (!pending) throw error;
+          if (s.device.gatt.connected !== true || attempt >= 2) {
+            this.reselect(true);
+            error.permanent = true;
+            error.message += '。请在小屏「设备设置」开启 Bluefy 配对，再点「重置并重新选择」。';
+            throw error;
+          }
+          const delay = attempt === 0 ? 2000 : 3000;
+          this.step('等待小屏服务就绪（' + (attempt + 1) + '/2）');
+          this.phase('connecting','小屏服务还未出现，' + delay / 1000 + ' 秒后在当前连接重试。');
+          await wait(delay);
+          this.check(s.ticket);
+          if (s.device.gatt.connected === false) throw error;
+        }
+      }
+    }
+
+    async connectServer(device,ticket) {
+      for (let attempt = 0; ; attempt++) {
+        this.check(ticket);
+        this.step('连接蓝牙设备');
+        try {
+          return await this.nativeOp(device,ticket,'连接设备',20000,async () => {
+            const gatt = device.gatt;
+            if (gatt.connected === true && (typeof gatt.getPrimaryService === 'function' ||
+                typeof gatt.getPrimaryServices === 'function')) return gatt;
+            const result = await gatt.connect();
+            if (ticket === this.epoch && this.wanted) this.ownedGatt = gatt;
+            return result && (result.getPrimaryService || result.getPrimaryServices) ? result : gatt;
+          });
+        } catch (error) {
+          this.check(ticket);
+          if (error.permanent || error.timedOut || error.nativeName === 'AbortError' ||
+              !(error.nativeCode === '2' || error.nativeName === 'NetworkError')) throw error;
+          if (attempt >= 2) {
+            this.reselect(true);
+            error.permanent = true;
+            error.message += '。在小屏「设备设置」开启 Bluefy 配对，再点「重置并重新选择」。';
+            throw error;
+          }
+          this.step('等待蓝牙设备就绪（' + (attempt + 1) + '/2）');
+          this.phase('connecting','Bluefy 暂未连上，正在用已授权的小屏重试…');
+          await wait(attempt === 0 ? 800 : 1400);
+        }
+      }
+    }
+
     async open(device, ticket) {
-      this.step('连接蓝牙设备');
       this.phase('connecting','正在连接蓝牙设备…');
-      const op = (label,ms,fn) => this.nativeOp(device,ticket,label,ms,fn);
       if (!device.gatt) throw permanent('Bluefy 没有提供这台设备的蓝牙连接接口');
+      this.activeDevice = device;
       this.lost = () => {
-        if (ticket === this.epoch && this.wanted && device.gatt.connected !== true) {
-          const retry = Boolean(this.session && this.session.ready);
-          this.closed(Object.assign(new Error('iPhone 报告蓝牙设备已断开'), {nativeName:'gattserverdisconnected'}),retry);
+        // Before verification the pending connect/discovery/handshake owns its
+        // native error. A simultaneous disconnect event must not hide that error.
+        if (ticket === this.epoch && this.wanted && this.session && this.session.ready &&
+            device.gatt.connected !== true) {
+          this.closed(Object.assign(new Error('iPhone 报告蓝牙设备已断开'), {nativeName:'gattserverdisconnected'}));
         }
       };
       if (typeof device.addEventListener === 'function') {
         try { device.addEventListener('gattserverdisconnected', this.lost); }
         catch (_) { /* Read/write failures still report a dropped connection. */ }
       }
-      const server = await op('连接设备',20000,async () => {
-        const result = await device.gatt.connect();
-        if (ticket !== this.epoch && !this.wanted && device.gatt.connected && typeof device.gatt.disconnect === 'function') {
-          try { device.gatt.disconnect(); } catch (_) {}
-        }
-        return result && (result.getPrimaryService || result.getPrimaryServices) ? result : device.gatt;
-      });
+      const server = await this.connectServer(device,ticket);
       const connection = {device,ticket};
-      const service = await this.lookup(connection,server,SERVICE,'查找伴侣服务');
+      const service = await this.discoverService(connection,server);
       const rx = await this.lookup(connection,service,RX,'查找写入通道',true);
       const tx = await this.lookup(connection,service,TX,'查找读取通道',true);
       const s = {device, ticket, rx, tx, ready: false, tail: Promise.resolve(), lastAck: 0, marketKey: '', marketAt: 0,
@@ -307,8 +385,11 @@
       this.step('读回小屏状态');
       const first = await this.serial(s, () => this.snapshot(s));
       this.check(ticket);
+      if (device.gatt.connected === false)
+        throw Object.assign(new Error('验证期间 iPhone 报告蓝牙设备已断开'),{nativeName:'gattserverdisconnected'});
       s.ready = true;
       s.verifiedAt = Date.now(); s.stableReads = 1;
+      if (this.needsReselect) this.reselect(false);
       this.step('双向连接已验证');
       this.phase('connected','蓝牙伴侣已连接，双向通信正常');
       if (!this.published) { this.published = true; this.onConnection(true); }
@@ -319,8 +400,9 @@
     }
 
     disconnect(reason = 'user') {
+      if (!this.wanted && !this.connecting && !this.published && !this.activeDevice) return;
       if (this.wanted || this.connecting || this.published)
-        this.onTrace({kind:'end',stage:reason === 'leave' ? '离开网页，结束同步' :
+        this.onTrace({kind:'end',stage:reason === 'reset' ? '手动重置网页连接' : reason === 'leave' ? '离开网页，结束同步' :
                       this.connected ? '手动断开同步' : '手动取消连接'});
       this.wanted = false;
       clearTimeout(this.retryTimer);
@@ -335,6 +417,10 @@
                                code:error.nativeCode || '', directCode:error.directCode || '', inventory:error.inventory || '',
                                timeout:Boolean(error.timedOut)});
       this.session = null;
+      const active = this.activeDevice;
+      this.activeDevice = null;
+      const gatt = this.ownedGatt;
+      this.ownedGatt = null;
       ++this.epoch;
       clearTimeout(this.retryTimer);
       if (s) {
@@ -342,11 +428,12 @@
         this.detachNotifications(s);
         if (s.marketCtrl) s.marketCtrl.abort();
       }
-      if (this.device && this.lost && typeof this.device.removeEventListener === 'function') {
-        try { this.device.removeEventListener('gattserverdisconnected',this.lost); } catch (_) {}
+      if (active && this.lost && typeof active.removeEventListener === 'function') {
+        try { active.removeEventListener('gattserverdisconnected',this.lost); } catch (_) {}
       }
       this.lost = null;
-      const gatt = this.device && this.device.gatt;
+      // Only release a native connection this active attempt actually established.
+      // A failed or already ended page may still see another client's connected object.
       if (gatt && gatt.connected && typeof gatt.disconnect === 'function') {
         try { gatt.disconnect(); } catch (_) {}
       }

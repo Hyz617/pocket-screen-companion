@@ -7,10 +7,10 @@
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https://web.ifzq.gtimg.cn https://www.okx.com https://api.deepseek.com; img-src 'self' data:; object-src 'none'; form-action 'none'; base-uri 'none'">
   <title>掌上屏伴侣</title>
-  <link rel="stylesheet" href="style.css?v=4">
-  <script defer src="providers.js?v=4"></script>
-  <script defer src="ble.js?v=4"></script>
-  <script defer src="app.js?v=4"></script>
+  <link rel="stylesheet" href="style.css?v=5">
+  <script defer src="providers.js?v=5"></script>
+  <script defer src="ble.js?v=5"></script>
+  <script defer src="app.js?v=5"></script>
 </head>
 <body><main>
   <header><span class="mark" aria-hidden="true">⌁</span><strong>掌上屏伴侣</strong><span id="badge">未连接</span></header>
@@ -19,7 +19,9 @@
     <h1>连接随身屏</h1>
     <p>首次使用，先在小屏的「设备设置」开启 Bluefy 配对，再在这里选择 Waveshare Companion。</p>
     <button id="connect">连接蓝牙屏</button>
+    <button id="reset" class="text" hidden>重置并重新选择</button>
     <button id="choose" class="text">显示所有附近设备</button>
+    <p id="resetHint" class="note" hidden>重置会结束本页连接，并重新打开设备列表。</p>
     <output id="status" aria-live="polite">请打开小屏并开启 iPhone 蓝牙。</output>
     <p id="traceLast" hidden></p>
     <details class="trace">

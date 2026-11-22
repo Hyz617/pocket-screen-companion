@@ -96,9 +96,12 @@
   function controls() {
     const pending=phase==='recovering'||phase==='verifying'||phase==='connecting';
     const usable=connected&&phase==='connected';
-    el('connect').textContent=pending?'取消连接':connected?'断开蓝牙屏':connecting?'连接中…':'连接蓝牙屏';
+    el('connect').textContent=pending?'取消连接':connected?'断开蓝牙屏':connecting?'连接中…':
+                             link.needsReselect?'重置并重新选择':'连接蓝牙屏';
     el('connect').disabled=connecting&&!pending;
     el('choose').hidden=Boolean(pending||connecting||connected||!navigator.bluetooth);
+    el('reset').hidden=Boolean(pending||connecting||link.needsReselect||!navigator.bluetooth);
+    el('resetHint').hidden=!connected;
     el('read').disabled=!usable||loading||saving;
     let valid=true;
     for (const id of ['stocks','pairs']) {
@@ -135,21 +138,22 @@
     });g.stroke();
     chart.setAttribute('aria-label',quote.interval+'走势，最新价 '+quote.price+'，最低 '+min+'，最高 '+max);
   }
-  async function connect(choose) {
-    if(connected||phase==='recovering'||phase==='verifying'||phase==='connecting') {link.disconnect();return;}
+  async function connect(choose,reset=false) {
+    if(!reset&&(connected||phase==='recovering'||phase==='verifying'||phase==='connecting')) {link.disconnect();return;}
     connecting=true; controls();
-    try {await link.connect({choose});}
+    try {await (reset ? link.resetAndChoose() : link.connect({choose}));}
     catch(e) {if(phase!=='stopped'&&phase!=='failed') el('status').textContent=e.name==='NotFoundError'?'未选到设备。请在小屏的设备设置中开启伴侣搜索，再点连接。':(e.message||'蓝牙连接失败');}
     finally {connecting=false; controls();}
   }
-  el('connect').onclick=()=>connect(false);
+  el('connect').onclick=()=>connect(false,link.needsReselect&&!connected&&!connecting&&phase!=='recovering');
+  el('reset').onclick=()=>connect(false,true);
   el('choose').onclick=()=>connect(true);
   el('copy').onclick=async()=>{
     try {await navigator.clipboard.writeText(location.href);el('status').textContent='已复制，请粘贴到 Bluefy 的地址栏。';}
     catch(_) {el('status').textContent='请在地址栏长按并复制这个网页地址。';}
   };
   el('traceCopy').onclick=async()=>{
-    const report=['小屏连接记录 v4',...traceRows].concat(lastIssue ? ['最近一次异常 '+lastIssue] : []).join('\n');
+    const report=['小屏连接记录 v5',...traceRows].concat(lastIssue ? ['最近一次异常 '+lastIssue] : []).join('\n');
     try {
       await navigator.clipboard.writeText(report);
       el('traceCopyStatus').textContent='连接记录已复制。';
