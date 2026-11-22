@@ -2,7 +2,46 @@
   const el = id => document.getElementById(id);
   let connected=false, connecting=false, phase='stopped', saving=false, loading=false, asking=false, listsReady=false, session=0, answerTimer;
   const phases={connecting:'连接中',verifying:'正在验证',recovering:'恢复同步中',connected:'已连接',stopped:'未连接',failed:'连接失败'};
+  const traceKey='waveshare-connection-trace-v4';
+  let traceRows=[], lastIssue='';
+  try {
+    const saved=JSON.parse(localStorage.getItem(traceKey) || '{}');
+    if(Array.isArray(saved.rows)) traceRows=saved.rows.filter(s=>typeof s==='string').slice(-12);
+    if(typeof saved.last==='string') lastIssue=saved.last;
+  } catch (_) {}
+  function renderTrace() {
+    el('traceRows').textContent=traceRows.join('\n');
+    el('traceLatest').textContent=traceRows.length ? traceRows[traceRows.length-1].slice(9) : '尚无记录';
+    el('traceLast').hidden=!lastIssue;
+    el('traceLast').textContent=lastIssue ? '最近一次异常　'+lastIssue : '';
+    el('traceCopy').disabled=!traceRows.length&&!lastIssue;
+  }
+  function recordTrace(event) {
+    // Store only app-defined stages, standardized platform error names and numeric
+    // status. Native error text can include device identifiers and never goes here.
+    let detail=event.stage;
+    if(event.kind==='error') {
+      const known=/^(?:[A-Za-z]{1,28}Error|Error|gattserverdisconnected)$/;
+      const name=known.test(event.name||'') ? event.name : '';
+      detail+='未完成';
+      if(name==='gattserverdisconnected') detail+=' · 系统报告蓝牙断开';
+      else if(name && name!=='Error') detail+=' · '+name;
+      if(event.timeout) detail+=' · 等待超时';
+      if(event.code) detail+=' · 错误 '+event.code;
+      if(event.directCode && event.directCode!==event.code) detail+=' · 首次错误 '+event.directCode;
+    }
+    if(event.inventory) detail+=' · '+event.inventory;
+    const time=new Date();
+    const stamp=[time.getHours(),time.getMinutes(),time.getSeconds()].map(n=>String(n).padStart(2,'0')).join(':');
+    const row=stamp+' '+detail;
+    traceRows=[...traceRows.slice(-11),row];
+    if(event.kind==='error') lastIssue=row;
+    renderTrace();
+    try { localStorage.setItem(traceKey,JSON.stringify({rows:traceRows,last:lastIssue})); } catch(_) {}
+  }
+  renderTrace();
   const link = new PhoneLink({
+    onTrace: recordTrace,
     market: async (request,options) => {
       const quote=await PhoneProviders.market(request,options);
       if (!options.signal.aborted) showQuote(request,quote);
@@ -108,6 +147,17 @@
   el('copy').onclick=async()=>{
     try {await navigator.clipboard.writeText(location.href);el('status').textContent='已复制，请粘贴到 Bluefy 的地址栏。';}
     catch(_) {el('status').textContent='请在地址栏长按并复制这个网页地址。';}
+  };
+  el('traceCopy').onclick=async()=>{
+    const report=['小屏连接记录 v4',...traceRows].concat(lastIssue ? ['最近一次异常 '+lastIssue] : []).join('\n');
+    try {
+      await navigator.clipboard.writeText(report);
+      el('traceCopyStatus').textContent='连接记录已复制。';
+    } catch(_) {
+      const field=el('traceText');
+      field.hidden=false; field.value=report; field.focus(); field.select();
+      el('traceCopyStatus').textContent='请长按已选中的文字并复制。';
+    }
   };
   el('save').onclick=async()=>{
     const ticket=session; saving=true; controls();

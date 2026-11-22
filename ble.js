@@ -9,6 +9,13 @@
   const abort = () => new Error('蓝牙连接已结束');
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
   const permanent = message => Object.assign(new Error(message), {permanent:true});
+  const uuidKey = value => String(value || '').toLowerCase().replace(/[-{}]/g,'');
+  function nativeCode(cause) {
+    const raw = String(cause && cause.message || cause);
+    const match = raw.match(/^\s*(\d{1,6}|0x[\da-f]{1,8})\s*$/i) ||
+                  raw.match(/\b(?:code|status)\s*[:= ]\s*(-?\d{1,6}|0x[\da-f]{1,8})\b/i);
+    return match ? match[1] : '';
+  }
 
   function limited(text, bytes) {
     let used = 0, result = '';
@@ -88,6 +95,7 @@
       this.onStatus = options.onStatus || noop;
       this.onConnection = options.onConnection || noop;
       this.onPhase = options.onPhase || noop;
+      this.onTrace = options.onTrace || noop;
       this.onAnswer = options.onAnswer || noop;
       this.journal = options.journal || new AnswerJournal();
       this.bluetooth = options.bluetooth || (typeof navigator !== 'undefined' && navigator.bluetooth);
@@ -107,7 +115,7 @@
       this.lost = null;
       this.authorizedDevice = null;
       this.findAuthorizedDevice();
-      if (typeof window !== 'undefined') window.addEventListener('pagehide', () => this.disconnect());
+      if (typeof window !== 'undefined') window.addEventListener('pagehide', () => this.disconnect('leave'));
     }
     get connected() { return Boolean(this.session && this.session.ready); }
 
@@ -135,6 +143,11 @@
 
     check(ticket) { if (ticket !== this.epoch || !this.wanted) throw abort(); }
 
+    step(stage) {
+      this.traceStage = stage;
+      this.onTrace({kind:'step', stage});
+    }
+
     async nativeOp(device, ticket, stage, ms, operation) {
       this.check(ticket);
       // A timeout rejects our wait, not the platform operation. Retain its real
@@ -160,6 +173,7 @@
                        ((cause && cause.message) || String(cause));
         const error = new Error(stage + '：' + reason);
         error.nativeName = cause && cause.name;
+        error.nativeCode = nativeCode(cause);
         error.timedOut = Boolean(cause && cause.timedOut);
         error.permanent = Boolean(cause && (cause.permanent || ['SecurityError','NotAllowedError',
           'NotFoundError','NotSupportedError'].includes(cause.name)));
@@ -178,24 +192,28 @@
       this.wanted = true;
       this.retryCount = 0;
       clearTimeout(this.retryTimer);
+      this.step('开始连接');
       this.phase('connecting','正在准备蓝牙连接…');
       const ticket = ++this.epoch;
       const work = (async () => {
         let target = !choose && (this.device || this.authorizedDevice);
         if (!target) {
+          this.step('选择小屏并授权');
           this.phase('connecting','选择 Waveshare Companion，并允许蓝牙连接');
           try {
             const filter = choose ? {acceptAllDevices:true} : {filters:[{services:[SERVICE]}]};
             target = await this.bluetooth.requestDevice({...filter,optionalServices:[SERVICE]});
           } catch (error) {
-            if (error.name === 'NotFoundError') throw new Error('未选到蓝牙屏。请在小屏打开 Bluefy 配对，再点「显示所有附近设备」。');
+            if (error.name === 'NotFoundError') throw Object.assign(new Error('未选到蓝牙屏或已取消选择（NotFoundError）。请在小屏打开 Bluefy 配对，再点「显示所有附近设备」。'), {nativeName:error.name});
             if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
-              throw new Error('Bluefy 未获准搜索。请在 iPhone「设置 → 隐私与安全性 → 蓝牙」允许 Bluefy，再点连接。');
+              throw Object.assign(new Error('Bluefy 未获准搜索（' + error.name + '）。请在 iPhone「设置 → 隐私与安全性 → 蓝牙」允许 Bluefy，再点连接。'), {nativeName:error.name});
             }
             throw error;
           }
         }
         if (!this.wanted || ticket !== this.epoch) throw abort();
+        if (!target) throw permanent('Bluefy 没有返回所选的小屏');
+        this.step('页面已获设备授权');
         this.device = target;
         await this.open(target, ticket);
         try { localStorage.setItem('waveshare-ble-device', target.id); } catch (_) {}
@@ -210,32 +228,88 @@
       } finally { if (this.connecting === work) this.connecting = null; }
     }
 
+    async lookup(s, owner, uuid, label, characteristic = false) {
+      const single = characteristic ? 'getCharacteristic' : 'getPrimaryService';
+      const all = characteristic ? 'getCharacteristics' : 'getPrimaryServices';
+      this.step(label);
+      let direct;
+      try {
+        if (typeof owner[single] !== 'function') throw new TypeError('Bluefy 未提供直接查询');
+        const result = await this.nativeOp(s.device,s.ticket,label,8000,() => owner[single](uuid));
+        if (result) return result;
+        throw new Error('没有返回查询结果');
+      } catch (error) { direct = error; }
+      this.check(s.ticket);
+      if (direct.timedOut || ['SecurityError','NotAllowedError','AbortError'].includes(direct.nativeName) ||
+          s.device.gatt.connected === false) throw direct;
+      const type = characteristic ? '通道' : '服务';
+      if (typeof owner[all] !== 'function') {
+        direct.message += '。Bluefy 未提供列出' + type + '的功能';
+        direct.inventory = '无法列出已授权' + type;
+        throw direct;
+      }
+      let items;
+      try { items = await this.nativeOp(s.device,s.ticket,label + '列表',8000,() => owner[all]()); }
+      catch (error) {
+        error.message += '。首次查询结果：' + direct.message;
+        error.directCode = direct.nativeCode;
+        error.inventory = '列出已授权' + type + '失败';
+        throw error;
+      }
+      const list = items ? Array.from(items) : [];
+      const found = list.find(item => item && uuidKey(item.uuid) === uuidKey(uuid));
+      const count = Math.min(list.length,999);
+      const result = '本站可见 ' + count + ' 项' + type + '，' + (found ? '已找到' : '未找到') +
+                     (characteristic ? '指定通道' : '伴侣服务');
+      if (!found) {
+        direct.message += '。' + result;
+        direct.inventory = result;
+        throw direct;
+      }
+      this.onTrace({kind:'step',stage:label,inventory:result});
+      return found;
+    }
+
     async open(device, ticket) {
+      this.step('连接蓝牙设备');
       this.phase('connecting','正在连接蓝牙设备…');
       const op = (label,ms,fn) => this.nativeOp(device,ticket,label,ms,fn);
+      if (!device.gatt) throw permanent('Bluefy 没有提供这台设备的蓝牙连接接口');
+      this.lost = () => {
+        if (ticket === this.epoch && this.wanted && device.gatt.connected !== true) {
+          const retry = Boolean(this.session && this.session.ready);
+          this.closed(Object.assign(new Error('iPhone 报告蓝牙设备已断开'), {nativeName:'gattserverdisconnected'}),retry);
+        }
+      };
+      if (typeof device.addEventListener === 'function') {
+        try { device.addEventListener('gattserverdisconnected', this.lost); }
+        catch (_) { /* Read/write failures still report a dropped connection. */ }
+      }
       const server = await op('连接设备',20000,async () => {
         const result = await device.gatt.connect();
-        if (ticket !== this.epoch && !this.wanted && device.gatt.connected) device.gatt.disconnect();
-        return result;
+        if (ticket !== this.epoch && !this.wanted && device.gatt.connected && typeof device.gatt.disconnect === 'function') {
+          try { device.gatt.disconnect(); } catch (_) {}
+        }
+        return result && (result.getPrimaryService || result.getPrimaryServices) ? result : device.gatt;
       });
-      const service = await op('查找伴侣服务',8000,() => server.getPrimaryService(SERVICE));
-      const rx = await op('查找写入特征',8000,() => service.getCharacteristic(RX));
-      const tx = await op('查找读取特征',8000,() => service.getCharacteristic(TX));
+      const connection = {device,ticket};
+      const service = await this.lookup(connection,server,SERVICE,'查找伴侣服务');
+      const rx = await this.lookup(connection,service,RX,'查找写入通道',true);
+      const tx = await this.lookup(connection,service,TX,'查找读取通道',true);
       const s = {device, ticket, rx, tx, ready: false, tail: Promise.resolve(), lastAck: 0, marketKey: '', marketAt: 0,
                  aiKey: '', aiNext: 0};
       this.session = s;
-      this.lost = () => {
-        if (this.session === s && s.ready && ticket === this.epoch && !device.gatt.connected)
-          this.closed(new Error('iPhone 报告蓝牙设备已断开'));
-      };
-      device.addEventListener('gattserverdisconnected', this.lost);
       this.phase('verifying','已找到设备，正在验证双向蓝牙通信…');
+      this.step('发送握手');
       await this.serial(s, () => this.retryRead(s, '握手', () => this.write(s, Uint8Array.of(72))));
+      this.step('小屏已应答握手');
       await this.serial(s, () => this.tryNotifications(s, service));
+      this.step('读回小屏状态');
       const first = await this.serial(s, () => this.snapshot(s));
       this.check(ticket);
       s.ready = true;
       s.verifiedAt = Date.now(); s.stableReads = 1;
+      this.step('双向连接已验证');
       this.phase('connected','蓝牙伴侣已连接，双向通信正常');
       if (!this.published) { this.published = true; this.onConnection(true); }
       if (this.session !== s) return;
@@ -244,16 +318,22 @@
       s.clock = setTimeout(() => this.poll(s), 1600);
     }
 
-    disconnect() {
+    disconnect(reason = 'user') {
+      if (this.wanted || this.connecting || this.published)
+        this.onTrace({kind:'end',stage:reason === 'leave' ? '离开网页，结束同步' :
+                      this.connected ? '手动断开同步' : '手动取消连接'});
       this.wanted = false;
       clearTimeout(this.retryTimer);
       for (const job of this.aiJobs.values()) job.controller.abort();
       this.connecting = null;
-      this.closed(null, false);
+      this.closed(null, false,reason === 'leave' ? '已离开网页并结束同步' : '已手动结束蓝牙同步');
     }
 
-    closed(error, retry = true) {
+    closed(error, retry = true, endText = '') {
       const s = this.session;
+      if (error) this.onTrace({kind:'error',stage:this.traceStage || '蓝牙同步',name:error.nativeName || error.name,
+                               code:error.nativeCode || '', directCode:error.directCode || '', inventory:error.inventory || '',
+                               timeout:Boolean(error.timedOut)});
       this.session = null;
       ++this.epoch;
       clearTimeout(this.retryTimer);
@@ -262,14 +342,20 @@
         this.detachNotifications(s);
         if (s.marketCtrl) s.marketCtrl.abort();
       }
-      if (this.device && this.lost) this.device.removeEventListener('gattserverdisconnected',this.lost);
+      if (this.device && this.lost && typeof this.device.removeEventListener === 'function') {
+        try { this.device.removeEventListener('gattserverdisconnected',this.lost); } catch (_) {}
+      }
       this.lost = null;
-      if (this.device && this.device.gatt.connected) this.device.gatt.disconnect();
+      const gatt = this.device && this.device.gatt;
+      if (gatt && gatt.connected && typeof gatt.disconnect === 'function') {
+        try { gatt.disconnect(); } catch (_) {}
+      }
       if (this.published) { this.published = false; this.onConnection(false); }
       const detail = error && (error.message || String(error));
       if (!retry || !this.wanted || !this.device || (error && error.permanent) || this.retryCount >= 3) {
         this.wanted = false;
-        this.phase(error ? 'failed' : 'stopped', detail ? '同步已停止。' + detail : '已停止蓝牙同步');
+        if (error) this.onTrace({kind:'end',stage:'网页已停止本次同步'});
+        this.phase(error ? 'failed' : 'stopped', detail ? '同步已停止。' + detail : endText || '已停止蓝牙同步');
         return;
       }
       const backoff = 1500 * Math.pow(2, this.retryCount++);
@@ -335,8 +421,9 @@
     }
 
     detachNotifications(s) {
-      if (s.notice && s.noticeHandler)
-        s.notice.removeEventListener('characteristicvaluechanged', s.noticeHandler);
+      if (s.notice && s.noticeHandler && typeof s.notice.removeEventListener === 'function') {
+        try { s.notice.removeEventListener('characteristicvaluechanged', s.noticeHandler); } catch (_) {}
+      }
       if (s.waitingNotice) s.waitingNotice.finish(null);
       s.notice = s.noticeHandler = s.waitingNotice = null;
     }

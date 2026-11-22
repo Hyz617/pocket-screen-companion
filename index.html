@@ -7,10 +7,10 @@
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https://web.ifzq.gtimg.cn https://www.okx.com https://api.deepseek.com; img-src 'self' data:; object-src 'none'; form-action 'none'; base-uri 'none'">
   <title>掌上屏伴侣</title>
-  <link rel="stylesheet" href="style.css">
-  <script defer src="providers.js"></script>
-  <script defer src="ble.js?v=3"></script>
-  <script defer src="app.js?v=3"></script>
+  <link rel="stylesheet" href="style.css?v=4">
+  <script defer src="providers.js?v=4"></script>
+  <script defer src="ble.js?v=4"></script>
+  <script defer src="app.js?v=4"></script>
 </head>
 <body><main>
   <header><span class="mark" aria-hidden="true">⌁</span><strong>掌上屏伴侣</strong><span id="badge">未连接</span></header>
@@ -21,6 +21,14 @@
     <button id="connect">连接蓝牙屏</button>
     <button id="choose" class="text">显示所有附近设备</button>
     <output id="status" aria-live="polite">请打开小屏并开启 iPhone 蓝牙。</output>
+    <p id="traceLast" hidden></p>
+    <details class="trace">
+      <summary>连接记录 <span id="traceLatest">尚无记录</span></summary>
+      <pre id="traceRows"></pre>
+      <div class="trace-actions"><small>最近 12 步，仅保存在本机</small><button id="traceCopy" class="text" disabled>复制连接记录</button></div>
+      <output id="traceCopyStatus" aria-live="polite"></output>
+      <textarea id="traceText" rows="3" readonly hidden aria-label="可复制的连接记录"></textarea>
+    </details>
     <div id="help"><a href="https://apps.apple.com/cn/app/bluefy-web-ble-browser/id1492822055" rel="noreferrer">下载免费 Bluefy</a><button id="copy" class="text">复制本页链接</button></div>
   </section>
   <nav aria-label="功能"><button data-tab="screen" aria-pressed="true">行情</button><button data-tab="watch" aria-pressed="false">自选</button><button data-tab="ai" aria-pressed="false">DeepSeek</button></nav>
